@@ -1,5 +1,40 @@
 <?xml version='1.0' encoding='UTF-8'?>
-<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>刘佳鑫</title><link>https://donkeytt11111.github.io/ljx1997.github.io</link><description>欢迎你</description><copyright>刘佳鑫</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://donkeytt11111.github.io/ljx1997.github.io</link></image><lastBuildDate>Wed, 05 Mar 2025 07:36:57 +0000</lastBuildDate><managingEditor>刘佳鑫</managingEditor><ttl>60</ttl><webMaster>刘佳鑫</webMaster><item><title>K8S_install.sh</title><link>https://donkeytt11111.github.io/ljx1997.github.io/post/K8S_install.sh.html</link><description>```shell
+<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>刘佳鑫</title><link>https://donkeytt11111.github.io/ljx1997.github.io</link><description>欢迎你</description><copyright>刘佳鑫</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://donkeytt11111.github.io/ljx1997.github.io</link></image><lastBuildDate>Wed, 05 Mar 2025 07:37:57 +0000</lastBuildDate><managingEditor>刘佳鑫</managingEditor><ttl>60</ttl><webMaster>刘佳鑫</webMaster><item><title>ddi_install.sh</title><link>https://donkeytt11111.github.io/ljx1997.github.io/post/ddi_install.sh.html</link><description>```shell
+#!/bin/bash
+
+
+if [ -z '$1' ] || [ -z '$2' ] || [ -z '$3' ] || [ -z '$4' ] || [ -z '$5' ] || [ -z '$6' ] || [ -z '$7' ] || [ -z '$8' ]; then
+    echo '请提供八个IP地址作为参数，例如：bash ddi.sh 地址池：IPV4_1 IPV4_2 IPV6_1 IPV6_2 dnsIPV4_1 dnsIPV6_1 dhcpIPV4_1 dhcpIPV6_1'
+    echo '使用方式：bash ddi_install.sh 172.16.9.240 172.16.9.244 2408:862E:406:109::1000 2408:862E:406:109::2000 172.16.9.241 2408:862E:406:109::1000 172.16.9.242 2408:862E:406:109::1001'
+    exit 1
+fi
+
+
+LOG_FILE='./deployment.log'
+
+# 日志
+log() {
+  local message='$(date +'%Y-%m-%d %H:%M:%S') - $1'
+  echo '$message' 
+  echo '$message' &gt;&gt; '$LOG_FILE' 
+}
+
+kubectl taint nodes cncp-ms-01 node-role.kubernetes.io/control-plane:NoSchedule-
+kubectl taint nodes cncp-ms-02 node-role.kubernetes.io/control-plane:NoSchedule-
+kubectl taint nodes cncp-ms-03 node-role.kubernetes.io/control-plane:NoSchedule-
+kubectl taint nodes cncp-ns-01 node-role.kubernetes.io/control-plane:NoSchedule-
+kubectl taint nodes cncp-ns-02 node-role.kubernetes.io/control-plane:NoSchedule-
+kubectl taint nodes cncp-ns-03 node-role.kubernetes.io/control-plane:NoSchedule-
+
+check_pods_running() {
+  while true; do
+    pod_status=$(kubectl get pods --all-namespaces --no-headers -o custom-columns=STATUS:.status.phase)
+    
+    if echo '$pod_status' | grep -q -vE 'Running|Completed|Succeeded'; then
+      log '并非所有Pod都处于Running、Completed或Succeeded状态，等待5秒...'
+      sleep 5
+    else
+      log '所有Pod都处于Running、Completed或Succeeded状态。</description><guid isPermaLink="true">https://donkeytt11111.github.io/ljx1997.github.io/post/ddi_install.sh.html</guid><pubDate>Wed, 05 Mar 2025 07:37:30 +0000</pubDate></item><item><title>K8S_install.sh</title><link>https://donkeytt11111.github.io/ljx1997.github.io/post/K8S_install.sh.html</link><description>```shell
 
 #!/bin/bash
 

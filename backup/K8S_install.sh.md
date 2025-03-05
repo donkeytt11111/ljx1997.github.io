@@ -1,5 +1,4 @@
-<?xml version='1.0' encoding='UTF-8'?>
-<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>刘佳鑫</title><link>https://donkeytt11111.github.io/ljx1997.github.io</link><description>欢迎你</description><copyright>刘佳鑫</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://donkeytt11111.github.io/ljx1997.github.io</link></image><lastBuildDate>Wed, 05 Mar 2025 07:36:57 +0000</lastBuildDate><managingEditor>刘佳鑫</managingEditor><ttl>60</ttl><webMaster>刘佳鑫</webMaster><item><title>K8S_install.sh</title><link>https://donkeytt11111.github.io/ljx1997.github.io/post/K8S_install.sh.html</link><description>```shell
+```shell
 
 #!/bin/bash
 
@@ -8,8 +7,8 @@ IP_ADDRESS=$1
 HOSTNAME=$2
 
 # 检查参数是否为空
-if [ -z '$IP_ADDRESS' ] || [ -z '$HOSTNAME' ]; then
-    echo '使用错误: 使用方法为 bash test.sh &lt;IP地址&gt; &lt;主机名&gt;'
+if [ -z "$IP_ADDRESS" ] || [ -z "$HOSTNAME" ]; then
+    echo "使用错误: 使用方法为 bash test.sh <IP地址> <主机名>"
     exit 1
 fi
 
@@ -17,11 +16,11 @@ fi
 set_hostname() {
     hostnamectl set-hostname $HOSTNAME
     current_hostname=$(hostname)
-    if [[ '$current_hostname' == *'cncp'* ]]; then
-        echo 'Hostname set successfully and contains 'cncp'.'
-        echo '$IP_ADDRESS $HOSTNAME' | sudo tee -a /etc/hosts
+    if [[ "$current_hostname" == *"cncp"* ]]; then
+        echo "Hostname set successfully and contains 'cncp'."
+        echo "$IP_ADDRESS $HOSTNAME" | sudo tee -a /etc/hosts
     else
-        echo 'Hostname set successfully but does not contain 'cncp'. Exiting script.'
+        echo "Hostname set successfully but does not contain 'cncp'. Exiting script."
         exit 1
     fi
 }
@@ -31,7 +30,7 @@ initialize_network() {
     nmcli con mod enp3s0 connection.autoconnect yes
     systemctl enable NetworkManager
 
-    cat &lt;&lt;EOF | sudo tee -a /etc/profile
+    cat <<EOF | sudo tee -a /etc/profile
 #modprobe
 modprobe ip6_tables
 modprobe ip6table_mangle
@@ -39,8 +38,8 @@ modprobe ip6table_raw
 modprobe ip6table_filter
 EOF
     source /etc/profile
-    echo 'net.ipv6.conf.default.forwarding=1' &gt;&gt; /etc/sysctl.conf
-    echo 'net.ipv6.conf.all.forwarding=1' &gt;&gt; /etc/sysctl.conf
+    echo "net.ipv6.conf.default.forwarding=1" >> /etc/sysctl.conf
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
     sysctl -p
     sudo systemctl stop firewalld
     sudo systemctl disable firewalld
@@ -64,9 +63,9 @@ install_and_configure_chrony() {
     systemctl enable chronyd --now
     systemctl restart chronyd
     if systemctl is-active --quiet chronyd; then
-        echo 'chrony 服务正在运行'
+        echo "chrony 服务正在运行"
     else
-        echo 'chrony 服务未运行'
+        echo "chrony 服务未运行"
         exit 1
     fi
     chronyc sources
@@ -76,7 +75,7 @@ install_and_configure_chrony() {
 install_and_configure_ipvs() {
     yum install -y conntrack-tools socat iproute-tc
     yum -y install ipset ipvsadm ebtables socat ipset conntrack
-    cat &gt; /etc/sysconfig/modules/ipvs.modules &lt;&lt;EOF
+    cat > /etc/sysconfig/modules/ipvs.modules <<EOF
 #!/bin/bash
 modprobe ip_vs
 modprobe ip_vs_rr
@@ -85,7 +84,7 @@ modprobe ip_vs_sh
 modprobe nf_conntrack
 EOF
 
-    chmod 755 /etc/sysconfig/modules/ipvs.modules &amp;&amp; bash /etc/sysconfig/modules/ipvs.modules
+    chmod 755 /etc/sysconfig/modules/ipvs.modules && bash /etc/sysconfig/modules/ipvs.modules
 }
 
 # 安装和配置 containerd
@@ -105,7 +104,7 @@ install_and_configure_containerd() {
 
 # 创建并配置 containerd.service 文件
 create_containerd_service_file() {
-    cat &gt; /etc/systemd/system/containerd.service &lt;&lt;EOF
+    cat > /etc/systemd/system/containerd.service <<EOF
 [Unit]
 Description=containerd container runtime
 Documentation=https://containerd.io
@@ -135,16 +134,16 @@ EOF
 
 # 安装和配置 Kubernetes
 install_and_configure_k8s() {
-    cat &lt;&lt;EOF | sudo tee /etc/sysctl.d/k8s.conf
+    cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
 net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward = 1
 EOF
 
-    modprobe br_netfilter &amp;&amp; sysctl -p /etc/sysctl.d/k8s.conf
+    modprobe br_netfilter && sysctl -p /etc/sysctl.d/k8s.conf
 
 
-cat &lt;&lt;EOF | sudo tee /etc/systemd/system/kubelet.service
+cat <<EOF | sudo tee /etc/systemd/system/kubelet.service
 [Unit]
 Description=Kubernetes Kubelet
 Documentation=https://kubernetes.io/docs/concepts/overview/components/#kubelet
@@ -177,19 +176,19 @@ EOF
     mkdir -p /var/lib/kubelet
     chown -R root:root /var/lib/kubelet
     chmod 755 /var/lib/kubelet
-    kubeadm config print init-defaults --component-configs KubeletConfiguration &gt; /var/lib/kubelet/config.yaml
+    kubeadm config print init-defaults --component-configs KubeletConfiguration > /var/lib/kubelet/config.yaml
     # 添加主机名和IP到 /etc/hosts
-    systemctl enable kubelet &amp;&amp; systemctl start kubelet
+    systemctl enable kubelet && systemctl start kubelet
 }
 
 # 替换 kubeadm 配置文件内容
 replace_kubeadm_config() {
     # 使用 sed 替换文件内容
-    sed -i 's/172.16.9.120/$IP_ADDRESS/g' kubeadm.yaml
-    sed -i 's/CNCP-MS-01/$HOSTNAME/g' kubeadm.yaml
-    sed -i 's/cncp-ms-01/$HOSTNAME/g' cilium.yaml
-    sed -i 's/172.16.9.120/$IP_ADDRESS/g' cluster.yaml
-    echo '替换完成'
+    sed -i "s/172.16.9.120/$IP_ADDRESS/g" kubeadm.yaml
+    sed -i "s/CNCP-MS-01/$HOSTNAME/g" kubeadm.yaml
+    sed -i "s/cncp-ms-01/$HOSTNAME/g" cilium.yaml
+    sed -i "s/172.16.9.120/$IP_ADDRESS/g" cluster.yaml
+    echo "替换完成"
 }
 
 # 设置 Kubernetes
@@ -211,7 +210,7 @@ setup_kubernetes() {
 install_and_configure_nfs() {
     yum install -y nfs-utils
     systemctl enable --now nfs-server
-    echo '/var/local-storage *(rw,sync,no_root_squash)' | sudo tee -a /etc/exports
+    echo "/var/local-storage *(rw,sync,no_root_squash)" | sudo tee -a /etc/exports
     systemctl restart nfs-server
 }
 
@@ -257,4 +256,3 @@ install_and_configure_nfs
 
 # 安装和配置bridge
 # install_and_configure_bridge
-。</description><guid isPermaLink="true">https://donkeytt11111.github.io/ljx1997.github.io/post/K8S_install.sh.html</guid><pubDate>Wed, 05 Mar 2025 07:36:33 +0000</pubDate></item><item><title>test</title><link>https://donkeytt11111.github.io/ljx1997.github.io/post/test.html</link><description>test。</description><guid isPermaLink="true">https://donkeytt11111.github.io/ljx1997.github.io/post/test.html</guid><pubDate>Wed, 05 Mar 2025 07:20:50 +0000</pubDate></item></channel></rss>

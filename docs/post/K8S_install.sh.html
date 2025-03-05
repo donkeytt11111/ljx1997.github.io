@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html data-color-mode="light" data-dark-theme="dark" data-light-theme="light" lang="zh-CN">
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="content-type" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <link href='https://mirrors.sustech.edu.cn/cdnjs/ajax/libs/Primer/21.0.7/primer.css' rel='stylesheet' />
+    
+    <link rel="icon" href="https://github.githubassets.com/favicons/favicon.svg"><script>
+        let theme = localStorage.getItem("meek_theme") || "light";
+        document.documentElement.setAttribute("data-color-mode", theme);
+    </script>
+<meta name="description" content="```shell
+
+#!/bin/bash
+
+# 变量定义
+IP_ADDRESS=$1
+HOSTNAME=$2
+
+# 检查参数是否为空
+if [ -z '$IP_ADDRESS' ] || [ -z '$HOSTNAME' ]; then
+    echo '使用错误: 使用方法为 bash test.sh <IP地址> <主机名>'
+    exit 1
+fi
+
+# 设置主机名
+set_hostname() {
+    hostnamectl set-hostname $HOSTNAME
+    current_hostname=$(hostname)
+    if [[ '$current_hostname' == *'cncp'* ]]; then
+        echo 'Hostname set successfully and contains 'cncp'.'
+        echo '$IP_ADDRESS $HOSTNAME' | sudo tee -a /etc/hosts
+    else
+        echo 'Hostname set successfully but does not contain 'cncp'. Exiting script.'
+        exit 1
+    fi
+}
+
+# 初始化网络配置
+initialize_network() {
+    nmcli con mod enp3s0 connection.autoconnect yes
+    systemctl enable NetworkManager
+
+    cat <<EOF | sudo tee -a /etc/profile
+#modprobe
+modprobe ip6_tables
+modprobe ip6table_mangle
+modprobe ip6table_raw
+modprobe ip6table_filter
+EOF
+    source /etc/profile
+    echo 'net.ipv6.conf.default.forwarding=1' >> /etc/sysctl.conf
+    echo 'net.ipv6.conf.all.forwarding=1' >> /etc/sysctl.conf
+    sysctl -p
+    sudo systemctl stop firewalld
+    sudo systemctl disable firewalld
+    sudo setenforce 0
+    sudo sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config
+    sudo swapoff -a
+
+    mkdir -p /opt/cni/bin
+    mkdir -p /etc/cni/net.d
+    tar -xzvf cni-plugins-linux-amd64-v1.6.2.tgz -C /opt/cni/bin
+}
+
+
+
+# 安装和配置 chrony
+install_and_configure_chrony() {
+    yum install -y chrony
+    sed -i.bak '3,6d' /etc/chrony.conf
+    sed -i '3c server ntp1.aliyun.com iburst' /etc/chrony.conf
+
+    systemctl enable chronyd --now
+    systemctl restart chronyd
+    if systemctl is-active --quiet chronyd; then
+        echo 'chrony 服务正在运行'
+    else
+        echo 'chrony 服务未运行'
+        exit 1
+    fi
+    chronyc sources
+}
+
+# 安装和配置 IPVS
+install_and_configure_ipvs() {
+    yum install -y conntrack-tools socat iproute-tc
+    yum -y install ipset ipvsadm ebtables socat ipset conntrack
+    cat > /etc/sysconfig/modules/ipvs.modules <<EOF
+#!/bin/bash
+modprobe ip_vs
+modprobe ip_vs_rr
+modprobe ip_vs_wrr
+modprobe ip_vs_sh
+modprobe nf_conntrack
+EOF
+
+    chmod 755 /etc/sysconfig/modules/ipvs.modules && bash /etc/sysconfig/modules/ipvs.modules
+}
+
+# 安装和配置 containerd
+install_and_configure_containerd() {
+    # 解压 containerd
+    tar xf cri-containerd-1.7.3-linux-amd64.tar.gz  -C /
+    cp 05-cilium.conflist /etc/cni/net.d
+    sudo cp -rf  helm nerdctl runc  cilium /usr/local/bin/
+    mkdir -p /etc/containerd
+    cp -rf config.toml /etc/containerd/
+    cp -rf conf.d /etc/containerd/
+    sudo chmod +x  /usr/local/bin/helm /usr/local/bin/nerdctl  /usr/local/bin/runc  /usr/local/bin/cilium
+    sudo systemctl start containerd
+    sudo systemctl enable containerd
+    sudo systemctl restart containerd
+}
+
+# 创建并配置 containerd.service 文件
+create_containerd_service_file() {
+    cat > /etc/systemd/system/containerd.service <<EOF
+[Unit]
+Description=containerd container runtime
+Documentation=https://containerd.io
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/containerd
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGQUIT
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStopSec=0
+Restart=always
+StartLimitBurst=3
+StartLimitInterval=60s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # 重新加载 systemd 配置
+    sudo systemctl daemon-reload
+}
+
+# 安装和配置 Kubernetes
+install_and_configure_k8s() {
+    cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward = 1
+EOF
+
+    modprobe br_netfilter && sysctl -p /etc/sysctl.d/k8s.conf
+
+
+cat <<EOF | sudo tee /etc/systemd/system/kubelet.service
+[Unit]
+Description=Kubernetes Kubelet
+Documentation=https://kubernetes.io/docs/concepts/overview/components/#kubelet
+After=containerd.service
+Requires=containerd.service
+
+[Service]
+ExecStart=/usr/local/bin/kubelet \\
+  --kubeconfig=/etc/kubernetes/kubelet.conf \\
+  --config=/var/lib/kubelet/config.yaml \\
+  --v=2
+Restart=always
+StartLimitInterval=0
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+
+    systemctl daemon-reload
+    tar -xzf kubernetes-server-linux-amd64.tar.gz
+    sudo cp kubernetes/server/bin/kubeadm /usr/local/bin/
+    sudo cp kubernetes/server/bin/kubelet /usr/local/bin/
+    sudo cp kubernetes/server/bin/kubectl /usr/local/bin/
+
+    systemctl enable kubeadm --now
+    systemctl enable kubelet --now
+    systemctl enable kubectl --now
+    mkdir -p /var/lib/kubelet
+    chown -R root:root /var/lib/kubelet
+    chmod 755 /var/lib/kubelet
+    kubeadm config print init-defaults --component-configs KubeletConfiguration > /var/lib/kubelet/config.yaml
+    # 添加主机名和IP到 /etc/hosts
+    systemctl enable kubelet && systemctl start kubelet
+}
+
+# 替换 kubeadm 配置文件内容
+replace_kubeadm_config() {
+    # 使用 sed 替换文件内容
+    sed -i 's/172.16.9.120/$IP_ADDRESS/g' kubeadm.yaml
+    sed -i 's/CNCP-MS-01/$HOSTNAME/g' kubeadm.yaml
+    sed -i 's/cncp-ms-01/$HOSTNAME/g' cilium.yaml
+    sed -i 's/172.16.9.120/$IP_ADDRESS/g' cluster.yaml
+    echo '替换完成'
+}
+
+# 设置 Kubernetes
+setup_kubernetes() {
+    kubeadm init --config kubeadm.yaml --skip-phases=addon/kube-proxy --v=5
+    mkdir -p /root/.kube
+    cp -i /etc/kubernetes/admin.conf /root/.kube/config
+    chown root:root /root/.kube/config
+    kubectl create -f cilium.yaml
+    kubectl create -f cluster.yaml
+    kubectl create -f metallb-native.yaml
+    kubectl create -f dashboard-deploy-singlestack.yaml
+    kubectl create -f cni-installation-ds.yaml
+    kubectl create -f openebs.yaml
+    kubectl create -f openebs-sc.yaml
+}
+
+# 安装和配置 NFS
+install_and_configure_nfs() {
+    yum install -y nfs-utils
+    systemctl enable --now nfs-server
+    echo '/var/local-storage *(rw,sync,no_root_squash)' | sudo tee -a /etc/exports
+    systemctl restart nfs-server
+}
+
+# 安装和配置桥接网络
+install_and_configure_bridge() {
+    yum install -y bridge-utils
+    brctl addbr br-eno6
+    ip link set br-eno6 up
+    brctl addif br-eno6 eno6
+    systemctl enable bridge-utils
+}
+
+# 设置主机名
+set_hostname
+
+# 初始化网络配置
+initialize_network
+
+
+# 安装和配置chrony
+install_and_configure_chrony
+
+# 安装和配置ipvs
+install_and_configure_ipvs
+
+# 安装和配置containerd
+create_containerd_service_file
+
+# 安装和配置k8s
+install_and_configure_containerd
+
+# 安装和配置k8s
+install_and_configure_k8s
+
+# 替换kubeadm配置
+replace_kubeadm_config
+
+# 安装和配置kubernetes
+setup_kubernetes
+
+# 安装和配置nfs
+install_and_configure_nfs
+
+# 安装和配置bridge
+# install_and_configure_bridge
+。">
+<meta property="og:title" content="K8S_install.sh">
+<meta property="og:description" content="```shell
+
+#!/bin/bash
+
+# 变量定义
+IP_ADDRESS=$1
+HOSTNAME=$2
+
+# 检查参数是否为空
+if [ -z '$IP_ADDRESS' ] || [ -z '$HOSTNAME' ]; then
+    echo '使用错误: 使用方法为 bash test.sh <IP地址> <主机名>'
+    exit 1
+fi
+
+# 设置主机名
+set_hostname() {
+    hostnamectl set-hostname $HOSTNAME
+    current_hostname=$(hostname)
+    if [[ '$current_hostname' == *'cncp'* ]]; then
+        echo 'Hostname set successfully and contains 'cncp'.'
+        echo '$IP_ADDRESS $HOSTNAME' | sudo tee -a /etc/hosts
+    else
+        echo 'Hostname set successfully but does not contain 'cncp'. Exiting script.'
+        exit 1
+    fi
+}
+
+# 初始化网络配置
+initialize_network() {
+    nmcli con mod enp3s0 connection.autoconnect yes
+    systemctl enable NetworkManager
+
+    cat <<EOF | sudo tee -a /etc/profile
+#modprobe
+modprobe ip6_tables
+modprobe ip6table_mangle
+modprobe ip6table_raw
+modprobe ip6table_filter
+EOF
+    source /etc/profile
+    echo 'net.ipv6.conf.default.forwarding=1' >> /etc/sysctl.conf
+    echo 'net.ipv6.conf.all.forwarding=1' >> /etc/sysctl.conf
+    sysctl -p
+    sudo systemctl stop firewalld
+    sudo systemctl disable firewalld
+    sudo setenforce 0
+    sudo sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config
+    sudo swapoff -a
+
+    mkdir -p /opt/cni/bin
+    mkdir -p /etc/cni/net.d
+    tar -xzvf cni-plugins-linux-amd64-v1.6.2.tgz -C /opt/cni/bin
+}
+
+
+
+# 安装和配置 chrony
+install_and_configure_chrony() {
+    yum install -y chrony
+    sed -i.bak '3,6d' /etc/chrony.conf
+    sed -i '3c server ntp1.aliyun.com iburst' /etc/chrony.conf
+
+    systemctl enable chronyd --now
+    systemctl restart chronyd
+    if systemctl is-active --quiet chronyd; then
+        echo 'chrony 服务正在运行'
+    else
+        echo 'chrony 服务未运行'
+        exit 1
+    fi
+    chronyc sources
+}
+
+# 安装和配置 IPVS
+install_and_configure_ipvs() {
+    yum install -y conntrack-tools socat iproute-tc
+    yum -y install ipset ipvsadm ebtables socat ipset conntrack
+    cat > /etc/sysconfig/modules/ipvs.modules <<EOF
+#!/bin/bash
+modprobe ip_vs
+modprobe ip_vs_rr
+modprobe ip_vs_wrr
+modprobe ip_vs_sh
+modprobe nf_conntrack
+EOF
+
+    chmod 755 /etc/sysconfig/modules/ipvs.modules && bash /etc/sysconfig/modules/ipvs.modules
+}
+
+# 安装和配置 containerd
+install_and_configure_containerd() {
+    # 解压 containerd
+    tar xf cri-containerd-1.7.3-linux-amd64.tar.gz  -C /
+    cp 05-cilium.conflist /etc/cni/net.d
+    sudo cp -rf  helm nerdctl runc  cilium /usr/local/bin/
+    mkdir -p /etc/containerd
+    cp -rf config.toml /etc/containerd/
+    cp -rf conf.d /etc/containerd/
+    sudo chmod +x  /usr/local/bin/helm /usr/local/bin/nerdctl  /usr/local/bin/runc  /usr/local/bin/cilium
+    sudo systemctl start containerd
+    sudo systemctl enable containerd
+    sudo systemctl restart containerd
+}
+
+# 创建并配置 containerd.service 文件
+create_containerd_service_file() {
+    cat > /etc/systemd/system/containerd.service <<EOF
+[Unit]
+Description=containerd container runtime
+Documentation=https://containerd.io
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/containerd
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGQUIT
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStopSec=0
+Restart=always
+StartLimitBurst=3
+StartLimitInterval=60s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # 重新加载 systemd 配置
+    sudo systemctl daemon-reload
+}
+
+# 安装和配置 Kubernetes
+install_and_configure_k8s() {
+    cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward = 1
+EOF
+
+    modprobe br_netfilter && sysctl -p /etc/sysctl.d/k8s.conf
+
+
+cat <<EOF | sudo tee /etc/systemd/system/kubelet.service
+[Unit]
+Description=Kubernetes Kubelet
+Documentation=https://kubernetes.io/docs/concepts/overview/components/#kubelet
+After=containerd.service
+Requires=containerd.service
+
+[Service]
+ExecStart=/usr/local/bin/kubelet \\
+  --kubeconfig=/etc/kubernetes/kubelet.conf \\
+  --config=/var/lib/kubelet/config.yaml \\
+  --v=2
+Restart=always
+StartLimitInterval=0
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+
+    systemctl daemon-reload
+    tar -xzf kubernetes-server-linux-amd64.tar.gz
+    sudo cp kubernetes/server/bin/kubeadm /usr/local/bin/
+    sudo cp kubernetes/server/bin/kubelet /usr/local/bin/
+    sudo cp kubernetes/server/bin/kubectl /usr/local/bin/
+
+    systemctl enable kubeadm --now
+    systemctl enable kubelet --now
+    systemctl enable kubectl --now
+    mkdir -p /var/lib/kubelet
+    chown -R root:root /var/lib/kubelet
+    chmod 755 /var/lib/kubelet
+    kubeadm config print init-defaults --component-configs KubeletConfiguration > /var/lib/kubelet/config.yaml
+    # 添加主机名和IP到 /etc/hosts
+    systemctl enable kubelet && systemctl start kubelet
+}
+
+# 替换 kubeadm 配置文件内容
+replace_kubeadm_config() {
+    # 使用 sed 替换文件内容
+    sed -i 's/172.16.9.120/$IP_ADDRESS/g' kubeadm.yaml
+    sed -i 's/CNCP-MS-01/$HOSTNAME/g' kubeadm.yaml
+    sed -i 's/cncp-ms-01/$HOSTNAME/g' cilium.yaml
+    sed -i 's/172.16.9.120/$IP_ADDRESS/g' cluster.yaml
+    echo '替换完成'
+}
+
+# 设置 Kubernetes
+setup_kubernetes() {
+    kubeadm init --config kubeadm.yaml --skip-phases=addon/kube-proxy --v=5
+    mkdir -p /root/.kube
+    cp -i /etc/kubernetes/admin.conf /root/.kube/config
+    chown root:root /root/.kube/config
+    kubectl create -f cilium.yaml
+    kubectl create -f cluster.yaml
+    kubectl create -f metallb-native.yaml
+    kubectl create -f dashboard-deploy-singlestack.yaml
+    kubectl create -f cni-installation-ds.yaml
+    kubectl create -f openebs.yaml
+    kubectl create -f openebs-sc.yaml
+}
+
+# 安装和配置 NFS
+install_and_configure_nfs() {
+    yum install -y nfs-utils
+    systemctl enable --now nfs-server
+    echo '/var/local-storage *(rw,sync,no_root_squash)' | sudo tee -a /etc/exports
+    systemctl restart nfs-server
+}
+
+# 安装和配置桥接网络
+install_and_configure_bridge() {
+    yum install -y bridge-utils
+    brctl addbr br-eno6
+    ip link set br-eno6 up
+    brctl addif br-eno6 eno6
+    systemctl enable bridge-utils
+}
+
+# 设置主机名
+set_hostname
+
+# 初始化网络配置
+initialize_network
+
+
+# 安装和配置chrony
+install_and_configure_chrony
+
+# 安装和配置ipvs
+install_and_configure_ipvs
+
+# 安装和配置containerd
+create_containerd_service_file
+
+# 安装和配置k8s
+install_and_configure_containerd
+
+# 安装和配置k8s
+install_and_configure_k8s
+
+# 替换kubeadm配置
+replace_kubeadm_config
+
+# 安装和配置kubernetes
+setup_kubernetes
+
+# 安装和配置nfs
+install_and_configure_nfs
+
+# 安装和配置bridge
+# install_and_configure_bridge
+。">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://donkeytt11111.github.io/ljx1997.github.io/post/K8S_install.sh.html">
+<meta property="og:image" content="https://github.githubassets.com/favicons/favicon.svg">
+<title>K8S_install.sh</title>
+<link href="//unpkg.com/@wooorm/starry-night@2.1.1/style/both.css" rel="stylesheet" />
+
+
+</head>
+<style>
+body{box-sizing: border-box;min-width: 200px;max-width: 900px;margin: 20px auto;padding: 45px;font-size: 16px;font-family: sans-serif;line-height: 1.25;}
+#header{display:flex;padding-bottom:8px;border-bottom: 1px solid var(--borderColor-muted, var(--color-border-muted));margin-bottom: 16px;}
+#footer {margin-top:64px; text-align: center;font-size: small;}
+
+</style>
+
+<style>
+.postTitle{margin: auto 0;font-size:40px;font-weight:bold;}
+.title-right{display:flex;margin:auto 0 0 auto;}
+.title-right .circle{padding: 14px 16px;margin-right:8px;}
+#postBody{border-bottom: 1px solid var(--color-border-default);padding-bottom:36px;}
+#postBody hr{height:2px;}
+#cmButton{height:48px;margin-top:48px;}
+#comments{margin-top:64px;}
+.g-emoji{font-size:24px;}
+@media (max-width: 600px) {
+    body {padding: 8px;}
+    .postTitle{font-size:24px;}
+}
+.copy-feedback {
+    display: none;
+    position: absolute;
+    top: 10px;
+    right: 50px;
+    color: var(--color-fg-on-emphasis);
+    background-color: var(--color-fg-muted);
+    border-radius: 3px;
+    padding: 5px 8px;
+    font-size: 12px;
+}
+</style>
+
+
+
+
+<body>
+    <div id="header">
+<h1 class="postTitle">K8S_install.sh</h1>
+<div class="title-right">
+    <a href="https://donkeytt11111.github.io/ljx1997.github.io" id="buttonHome" class="btn btn-invisible circle" title="首页">
+        <svg class="octicon" width="16" height="16">
+            <path id="pathHome" fill-rule="evenodd"></path>
+        </svg>
+    </a>
+    
+    <a href="https://github.com/donkeytt11111/ljx1997.github.io/issues/2" target="_blank" class="btn btn-invisible circle" title="Issue">
+        <svg class="octicon" width="16" height="16">
+            <path id="pathIssue" fill-rule="evenodd"></path>
+        </svg>
+    </a>
+    
+
+    <a class="btn btn-invisible circle" onclick="modeSwitch();" title="切换主题">
+        <svg class="octicon" width="16" height="16" >
+            <path id="themeSwitch" fill-rule="evenodd"></path>
+        </svg>
+    </a>
+
+</div>
+</div>
+    <div id="content">
+<div class="markdown-body" id="postBody"><div class="highlight highlight-source-shell"><pre class="notranslate"><span class="pl-c"><span class="pl-c">#!</span>/bin/bash</span>
+
+<span class="pl-c"><span class="pl-c">#</span> 变量定义</span>
+IP_ADDRESS=<span class="pl-smi">$1</span>
+HOSTNAME=<span class="pl-smi">$2</span>
+
+<span class="pl-c"><span class="pl-c">#</span> 检查参数是否为空</span>
+<span class="pl-k">if</span> [ <span class="pl-k">-z</span> <span class="pl-s"><span class="pl-pds">"</span><span class="pl-smi">$IP_ADDRESS</span><span class="pl-pds">"</span></span> ] <span class="pl-k">||</span> [ <span class="pl-k">-z</span> <span class="pl-s"><span class="pl-pds">"</span><span class="pl-smi">$HOSTNAME</span><span class="pl-pds">"</span></span> ]<span class="pl-k">;</span> <span class="pl-k">then</span>
+    <span class="pl-c1">echo</span> <span class="pl-s"><span class="pl-pds">"</span>使用错误: 使用方法为 bash test.sh &lt;IP地址&gt; &lt;主机名&gt;<span class="pl-pds">"</span></span>
+    <span class="pl-c1">exit</span> 1
+<span class="pl-k">fi</span>
+
+<span class="pl-c"><span class="pl-c">#</span> 设置主机名</span>
+<span class="pl-en">set_hostname</span>() {
+    hostnamectl set-hostname <span class="pl-smi">$HOSTNAME</span>
+    current_hostname=<span class="pl-s"><span class="pl-pds">$(</span>hostname<span class="pl-pds">)</span></span>
+    <span class="pl-k">if</span> [[ <span class="pl-s"><span class="pl-pds">"</span><span class="pl-smi">$current_hostname</span><span class="pl-pds">"</span></span> <span class="pl-k">==</span> <span class="pl-k">*</span><span class="pl-s"><span class="pl-pds">"</span>cncp<span class="pl-pds">"</span></span><span class="pl-k">*</span> ]]<span class="pl-k">;</span> <span class="pl-k">then</span>
+        <span class="pl-c1">echo</span> <span class="pl-s"><span class="pl-pds">"</span>Hostname set successfully and contains 'cncp'.<span class="pl-pds">"</span></span>
+        <span class="pl-c1">echo</span> <span class="pl-s"><span class="pl-pds">"</span><span class="pl-smi">$IP_ADDRESS</span> <span class="pl-smi">$HOSTNAME</span><span class="pl-pds">"</span></span> <span class="pl-k">|</span> sudo tee -a /etc/hosts
+    <span class="pl-k">else</span>
+        <span class="pl-c1">echo</span> <span class="pl-s"><span class="pl-pds">"</span>Hostname set successfully but does not contain 'cncp'. Exiting script.<span class="pl-pds">"</span></span>
+        <span class="pl-c1">exit</span> 1
+    <span class="pl-k">fi</span>
+}
+
+<span class="pl-c"><span class="pl-c">#</span> 初始化网络配置</span>
+<span class="pl-en">initialize_network</span>() {
+    nmcli con mod enp3s0 connection.autoconnect yes
+    systemctl <span class="pl-c1">enable</span> NetworkManager
+
+    cat <span class="pl-s"><span class="pl-k">&lt;&lt;</span><span class="pl-k">EOF</span> | sudo tee -a /etc/profile</span>
+<span class="pl-s">#modprobe</span>
+<span class="pl-s">modprobe ip6_tables</span>
+<span class="pl-s">modprobe ip6table_mangle</span>
+<span class="pl-s">modprobe ip6table_raw</span>
+<span class="pl-s">modprobe ip6table_filter</span>
+<span class="pl-s"><span class="pl-k">EOF</span></span>
+    <span class="pl-c1">source</span> /etc/profile
+    <span class="pl-c1">echo</span> <span class="pl-s"><span class="pl-pds">"</span>net.ipv6.conf.default.forwarding=1<span class="pl-pds">"</span></span> <span class="pl-k">&gt;&gt;</span> /etc/sysctl.conf
+    <span class="pl-c1">echo</span> <span class="pl-s"><span class="pl-pds">"</span>net.ipv6.conf.all.forwarding=1<span class="pl-pds">"</span></span> <span class="pl-k">&gt;&gt;</span> /etc/sysctl.conf
+    sysctl -p
+    sudo systemctl stop firewalld
+    sudo systemctl disable firewalld
+    sudo setenforce 0
+    sudo sed -i <span class="pl-s"><span class="pl-pds">'</span>s/^SELINUX=.*/SELINUX=disabled/<span class="pl-pds">'</span></span> /etc/selinux/config
+    sudo swapoff -a
+
+    mkdir -p /opt/cni/bin
+    mkdir -p /etc/cni/net.d
+    tar -xzvf cni-plugins-linux-amd64-v1.6.2.tgz -C /opt/cni/bin
+}
+
+
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置 chrony</span>
+<span class="pl-en">install_and_configure_chrony</span>() {
+    yum install -y chrony
+    sed -i.bak <span class="pl-s"><span class="pl-pds">'</span>3,6d<span class="pl-pds">'</span></span> /etc/chrony.conf
+    sed -i <span class="pl-s"><span class="pl-pds">'</span>3c server ntp1.aliyun.com iburst<span class="pl-pds">'</span></span> /etc/chrony.conf
+
+    systemctl <span class="pl-c1">enable</span> chronyd --now
+    systemctl restart chronyd
+    <span class="pl-k">if</span> systemctl is-active --quiet chronyd<span class="pl-k">;</span> <span class="pl-k">then</span>
+        <span class="pl-c1">echo</span> <span class="pl-s"><span class="pl-pds">"</span>chrony 服务正在运行<span class="pl-pds">"</span></span>
+    <span class="pl-k">else</span>
+        <span class="pl-c1">echo</span> <span class="pl-s"><span class="pl-pds">"</span>chrony 服务未运行<span class="pl-pds">"</span></span>
+        <span class="pl-c1">exit</span> 1
+    <span class="pl-k">fi</span>
+    chronyc sources
+}
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置 IPVS</span>
+<span class="pl-en">install_and_configure_ipvs</span>() {
+    yum install -y conntrack-tools socat iproute-tc
+    yum -y install ipset ipvsadm ebtables socat ipset conntrack
+    cat <span class="pl-k">&gt;</span> /etc/sysconfig/modules/ipvs.modules <span class="pl-s"><span class="pl-k">&lt;&lt;</span><span class="pl-k">EOF</span></span>
+<span class="pl-s">#!/bin/bash</span>
+<span class="pl-s">modprobe ip_vs</span>
+<span class="pl-s">modprobe ip_vs_rr</span>
+<span class="pl-s">modprobe ip_vs_wrr</span>
+<span class="pl-s">modprobe ip_vs_sh</span>
+<span class="pl-s">modprobe nf_conntrack</span>
+<span class="pl-s"><span class="pl-k">EOF</span></span>
+
+    chmod 755 /etc/sysconfig/modules/ipvs.modules <span class="pl-k">&amp;&amp;</span> bash /etc/sysconfig/modules/ipvs.modules
+}
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置 containerd</span>
+<span class="pl-en">install_and_configure_containerd</span>() {
+    <span class="pl-c"><span class="pl-c">#</span> 解压 containerd</span>
+    tar xf cri-containerd-1.7.3-linux-amd64.tar.gz  -C /
+    cp 05-cilium.conflist /etc/cni/net.d
+    sudo cp -rf  helm nerdctl runc  cilium /usr/local/bin/
+    mkdir -p /etc/containerd
+    cp -rf config.toml /etc/containerd/
+    cp -rf conf.d /etc/containerd/
+    sudo chmod +x  /usr/local/bin/helm /usr/local/bin/nerdctl  /usr/local/bin/runc  /usr/local/bin/cilium
+    sudo systemctl start containerd
+    sudo systemctl <span class="pl-c1">enable</span> containerd
+    sudo systemctl restart containerd
+}
+
+<span class="pl-c"><span class="pl-c">#</span> 创建并配置 containerd.service 文件</span>
+<span class="pl-en">create_containerd_service_file</span>() {
+    cat <span class="pl-k">&gt;</span> /etc/systemd/system/containerd.service <span class="pl-s"><span class="pl-k">&lt;&lt;</span><span class="pl-k">EOF</span></span>
+<span class="pl-s">[Unit]</span>
+<span class="pl-s">Description=containerd container runtime</span>
+<span class="pl-s">Documentation=https://containerd.io</span>
+<span class="pl-s">After=network.target</span>
+<span class="pl-s"></span>
+<span class="pl-s">[Service]</span>
+<span class="pl-s">ExecStart=/usr/local/bin/containerd</span>
+<span class="pl-s">ExecReload=/bin/kill -HUP <span class="pl-smi">$MAINPID</span></span>
+<span class="pl-s">KillSignal=SIGQUIT</span>
+<span class="pl-s">Delegate=yes</span>
+<span class="pl-s">LimitNOFILE=1048576</span>
+<span class="pl-s">LimitNPROC=infinity</span>
+<span class="pl-s">LimitCORE=infinity</span>
+<span class="pl-s">TasksMax=infinity</span>
+<span class="pl-s">TimeoutStopSec=0</span>
+<span class="pl-s">Restart=always</span>
+<span class="pl-s">StartLimitBurst=3</span>
+<span class="pl-s">StartLimitInterval=60s</span>
+<span class="pl-s"></span>
+<span class="pl-s">[Install]</span>
+<span class="pl-s">WantedBy=multi-user.target</span>
+<span class="pl-s"><span class="pl-k">EOF</span></span>
+
+    <span class="pl-c"><span class="pl-c">#</span> 重新加载 systemd 配置</span>
+    sudo systemctl daemon-reload
+}
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置 Kubernetes</span>
+<span class="pl-en">install_and_configure_k8s</span>() {
+    cat <span class="pl-s"><span class="pl-k">&lt;&lt;</span><span class="pl-k">EOF</span> | sudo tee /etc/sysctl.d/k8s.conf</span>
+<span class="pl-s">net.bridge.bridge-nf-call-iptables = 1</span>
+<span class="pl-s">net.bridge.bridge-nf-call-ip6tables = 1</span>
+<span class="pl-s">net.ipv4.ip_forward = 1</span>
+<span class="pl-s"><span class="pl-k">EOF</span></span>
+
+    modprobe br_netfilter <span class="pl-k">&amp;&amp;</span> sysctl -p /etc/sysctl.d/k8s.conf
+
+
+cat <span class="pl-s"><span class="pl-k">&lt;&lt;</span><span class="pl-k">EOF</span> | sudo tee /etc/systemd/system/kubelet.service</span>
+<span class="pl-s">[Unit]</span>
+<span class="pl-s">Description=Kubernetes Kubelet</span>
+<span class="pl-s">Documentation=https://kubernetes.io/docs/concepts/overview/components/#kubelet</span>
+<span class="pl-s">After=containerd.service</span>
+<span class="pl-s">Requires=containerd.service</span>
+<span class="pl-s"></span>
+<span class="pl-s">[Service]</span>
+<span class="pl-s">ExecStart=/usr/local/bin/kubelet <span class="pl-cce">\\</span></span>
+<span class="pl-s">  --kubeconfig=/etc/kubernetes/kubelet.conf <span class="pl-cce">\\</span></span>
+<span class="pl-s">  --config=/var/lib/kubelet/config.yaml <span class="pl-cce">\\</span></span>
+<span class="pl-s">  --v=2</span>
+<span class="pl-s">Restart=always</span>
+<span class="pl-s">StartLimitInterval=0</span>
+<span class="pl-s">RestartSec=10</span>
+<span class="pl-s"></span>
+<span class="pl-s">[Install]</span>
+<span class="pl-s">WantedBy=multi-user.target</span>
+<span class="pl-s"><span class="pl-k">EOF</span></span>
+
+
+    systemctl daemon-reload
+    tar -xzf kubernetes-server-linux-amd64.tar.gz
+    sudo cp kubernetes/server/bin/kubeadm /usr/local/bin/
+    sudo cp kubernetes/server/bin/kubelet /usr/local/bin/
+    sudo cp kubernetes/server/bin/kubectl /usr/local/bin/
+
+    systemctl <span class="pl-c1">enable</span> kubeadm --now
+    systemctl <span class="pl-c1">enable</span> kubelet --now
+    systemctl <span class="pl-c1">enable</span> kubectl --now
+    mkdir -p /var/lib/kubelet
+    chown -R root:root /var/lib/kubelet
+    chmod 755 /var/lib/kubelet
+    kubeadm config print init-defaults --component-configs KubeletConfiguration <span class="pl-k">&gt;</span> /var/lib/kubelet/config.yaml
+    <span class="pl-c"><span class="pl-c">#</span> 添加主机名和IP到 /etc/hosts</span>
+    systemctl <span class="pl-c1">enable</span> kubelet <span class="pl-k">&amp;&amp;</span> systemctl start kubelet
+}
+
+<span class="pl-c"><span class="pl-c">#</span> 替换 kubeadm 配置文件内容</span>
+<span class="pl-en">replace_kubeadm_config</span>() {
+    <span class="pl-c"><span class="pl-c">#</span> 使用 sed 替换文件内容</span>
+    sed -i <span class="pl-s"><span class="pl-pds">"</span>s/172.16.9.120/<span class="pl-smi">$IP_ADDRESS</span>/g<span class="pl-pds">"</span></span> kubeadm.yaml
+    sed -i <span class="pl-s"><span class="pl-pds">"</span>s/CNCP-MS-01/<span class="pl-smi">$HOSTNAME</span>/g<span class="pl-pds">"</span></span> kubeadm.yaml
+    sed -i <span class="pl-s"><span class="pl-pds">"</span>s/cncp-ms-01/<span class="pl-smi">$HOSTNAME</span>/g<span class="pl-pds">"</span></span> cilium.yaml
+    sed -i <span class="pl-s"><span class="pl-pds">"</span>s/172.16.9.120/<span class="pl-smi">$IP_ADDRESS</span>/g<span class="pl-pds">"</span></span> cluster.yaml
+    <span class="pl-c1">echo</span> <span class="pl-s"><span class="pl-pds">"</span>替换完成<span class="pl-pds">"</span></span>
+}
+
+<span class="pl-c"><span class="pl-c">#</span> 设置 Kubernetes</span>
+<span class="pl-en">setup_kubernetes</span>() {
+    kubeadm init --config kubeadm.yaml --skip-phases=addon/kube-proxy --v=5
+    mkdir -p /root/.kube
+    cp -i /etc/kubernetes/admin.conf /root/.kube/config
+    chown root:root /root/.kube/config
+    kubectl create -f cilium.yaml
+    kubectl create -f cluster.yaml
+    kubectl create -f metallb-native.yaml
+    kubectl create -f dashboard-deploy-singlestack.yaml
+    kubectl create -f cni-installation-ds.yaml
+    kubectl create -f openebs.yaml
+    kubectl create -f openebs-sc.yaml
+}
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置 NFS</span>
+<span class="pl-en">install_and_configure_nfs</span>() {
+    yum install -y nfs-utils
+    systemctl <span class="pl-c1">enable</span> --now nfs-server
+    <span class="pl-c1">echo</span> <span class="pl-s"><span class="pl-pds">"</span>/var/local-storage *(rw,sync,no_root_squash)<span class="pl-pds">"</span></span> <span class="pl-k">|</span> sudo tee -a /etc/exports
+    systemctl restart nfs-server
+}
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置桥接网络</span>
+<span class="pl-en">install_and_configure_bridge</span>() {
+    yum install -y bridge-utils
+    brctl addbr br-eno6
+    ip link <span class="pl-c1">set</span> br-eno6 up
+    brctl addif br-eno6 eno6
+    systemctl <span class="pl-c1">enable</span> bridge-utils
+}
+
+<span class="pl-c"><span class="pl-c">#</span> 设置主机名</span>
+set_hostname
+
+<span class="pl-c"><span class="pl-c">#</span> 初始化网络配置</span>
+initialize_network
+
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置chrony</span>
+install_and_configure_chrony
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置ipvs</span>
+install_and_configure_ipvs
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置containerd</span>
+create_containerd_service_file
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置k8s</span>
+install_and_configure_containerd
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置k8s</span>
+install_and_configure_k8s
+
+<span class="pl-c"><span class="pl-c">#</span> 替换kubeadm配置</span>
+replace_kubeadm_config
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置kubernetes</span>
+setup_kubernetes
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置nfs</span>
+install_and_configure_nfs
+
+<span class="pl-c"><span class="pl-c">#</span> 安装和配置bridge</span>
+<span class="pl-c"><span class="pl-c">#</span> install_and_configure_bridge</span></pre></div></div>
+<div style="font-size:small;margin-top:8px;float:right;"></div>
+
+<button class="btn btn-block" type="button" onclick="openComments()" id="cmButton">评论</button>
+<div class="comments" id="comments"></div>
+
+</div>
+    <div id="footer"><div id="footer1">Copyright © <span id="copyrightYear"></span> <a href="https://donkeytt11111.github.io/ljx1997.github.io">刘佳鑫</a></div>
+<div id="footer2">
+    <span id="runday"></span><span>Powered by <a href="https://meekdai.com/Gmeek.html" target="_blank">Gmeek</a></span>
+</div>
+
+<script>
+var now=new Date();
+document.getElementById("copyrightYear").innerHTML=now.getFullYear();
+
+if(""!=""){
+    var startSite=new Date("");
+    var diff=now.getTime()-startSite.getTime();
+    var diffDay=Math.floor(diff/(1000*60*60*24));
+    document.getElementById("runday").innerHTML="网站运行"+diffDay+"天"+" • ";
+}
+</script></div>
+</body>
+<script>
+var IconList={'sun': 'M8 10.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5zM8 12a4 4 0 100-8 4 4 0 000 8zM8 0a.75.75 0 01.75.75v1.5a.75.75 0 01-1.5 0V.75A.75.75 0 018 0zm0 13a.75.75 0 01.75.75v1.5a.75.75 0 01-1.5 0v-1.5A.75.75 0 018 13zM2.343 2.343a.75.75 0 011.061 0l1.06 1.061a.75.75 0 01-1.06 1.06l-1.06-1.06a.75.75 0 010-1.06zm9.193 9.193a.75.75 0 011.06 0l1.061 1.06a.75.75 0 01-1.06 1.061l-1.061-1.06a.75.75 0 010-1.061zM16 8a.75.75 0 01-.75.75h-1.5a.75.75 0 010-1.5h1.5A.75.75 0 0116 8zM3 8a.75.75 0 01-.75.75H.75a.75.75 0 010-1.5h1.5A.75.75 0 013 8zm10.657-5.657a.75.75 0 010 1.061l-1.061 1.06a.75.75 0 11-1.06-1.06l1.06-1.06a.75.75 0 011.06 0zm-9.193 9.193a.75.75 0 010 1.06l-1.06 1.061a.75.75 0 11-1.061-1.06l1.06-1.061a.75.75 0 011.061 0z', 'moon': 'M9.598 1.591a.75.75 0 01.785-.175 7 7 0 11-8.967 8.967.75.75 0 01.961-.96 5.5 5.5 0 007.046-7.046.75.75 0 01.175-.786zm1.616 1.945a7 7 0 01-7.678 7.678 5.5 5.5 0 107.678-7.678z', 'sync': 'M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z', 'home': 'M6.906.664a1.749 1.749 0 0 1 2.187 0l5.25 4.2c.415.332.657.835.657 1.367v7.019A1.75 1.75 0 0 1 13.25 15h-3.5a.75.75 0 0 1-.75-.75V9H7v5.25a.75.75 0 0 1-.75.75h-3.5A1.75 1.75 0 0 1 1 13.25V6.23c0-.531.242-1.034.657-1.366l5.25-4.2Zm1.25 1.171a.25.25 0 0 0-.312 0l-5.25 4.2a.25.25 0 0 0-.094.196v7.019c0 .138.112.25.25.25H5.5V8.25a.75.75 0 0 1 .75-.75h3.5a.75.75 0 0 1 .75.75v5.25h2.75a.25.25 0 0 0 .25-.25V6.23a.25.25 0 0 0-.094-.195Z', 'github': 'M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z', 'copy': 'M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z', 'check': 'M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z'};
+var utterancesLoad=0;
+
+let themeSettings={
+    "dark": ["dark","moon","#00f0ff","dark-blue"],
+    "light": ["light","sun","#ff5000","github-light"],
+    "auto": ["auto","sync","","preferred-color-scheme"]
+};
+function changeTheme(mode, icon, color, utheme){
+    document.documentElement.setAttribute("data-color-mode",mode);
+    document.getElementById("themeSwitch").setAttribute("d",value=IconList[icon]);
+    document.getElementById("themeSwitch").parentNode.style.color=color;
+    if(utterancesLoad==1){utterancesTheme(utheme);}
+}
+function modeSwitch(){
+    let currentMode=document.documentElement.getAttribute('data-color-mode');
+    let newMode = currentMode === "light" ? "dark" : currentMode === "dark" ? "auto" : "light";
+    localStorage.setItem("meek_theme", newMode);
+    if(themeSettings[newMode]){
+        changeTheme(...themeSettings[newMode]);
+    }
+}
+function utterancesTheme(theme){
+    const message={type:'set-theme',theme: theme};
+    const iframe=document.getElementsByClassName('utterances-frame')[0];
+    iframe.contentWindow.postMessage(message,'https://utteranc.es');
+}
+if(themeSettings[theme]){changeTheme(...themeSettings[theme]);}
+console.log("\n %c Gmeek last https://github.com/Meekdai/Gmeek \n","padding:5px 0;background:#02d81d;color:#fff");
+</script>
+
+<script>
+document.getElementById("pathHome").setAttribute("d",IconList["home"]);
+document.getElementById("pathIssue").setAttribute("d",IconList["github"]);
+
+
+
+function openComments(){
+    cm=document.getElementById("comments");
+    cmButton=document.getElementById("cmButton");
+    cmButton.innerHTML="loading";
+    span=document.createElement("span");
+    span.setAttribute("class","AnimatedEllipsis");
+    cmButton.appendChild(span);
+
+    script=document.createElement("script");
+    script.setAttribute("src","https://utteranc.es/client.js");
+    script.setAttribute("repo","donkeytt11111/ljx1997.github.io");
+    script.setAttribute("issue-term","title");
+    
+    if(localStorage.getItem("meek_theme")=="dark"){script.setAttribute("theme","dark-blue");}
+    else if(localStorage.getItem("meek_theme")=="light") {script.setAttribute("theme","github-light");}
+    else{script.setAttribute("theme","preferred-color-scheme");}
+    
+    script.setAttribute("crossorigin","anonymous");
+    script.setAttribute("async","");
+    cm.appendChild(script);
+
+    int=self.setInterval("iFrameLoading()",200);
+}
+
+function iFrameLoading(){
+    var utterances=document.getElementsByClassName('utterances');
+    if(utterances.length==1){
+        if(utterances[0].style.height!=""){
+            utterancesLoad=1;
+            int=window.clearInterval(int);
+            document.getElementById("cmButton").style.display="none";
+            console.log("utterances Load OK");
+        }
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const createClipboardHTML = (codeContent, additionalClasses = '') => `
+        <pre class="notranslate"><code class="notranslate">${codeContent}</code></pre>
+        <div class="clipboard-container position-absolute right-0 top-0 ${additionalClasses}">
+            <clipboard-copy class="ClipboardButton btn m-2 p-0" role="button" style="display: inherit;">
+                <svg height="16" width="16" class="octicon octicon-copy m-2"><path d="${IconList["copy"]}"></path></svg>
+                <svg height="16" width="16" class="octicon octicon-check color-fg-success m-2 d-none"><path d="${IconList["check"]}"></path></svg>
+            </clipboard-copy>
+            <div class="copy-feedback">Copied!</div>
+        </div>
+    `;
+
+    const handleCodeElements = (selector = '') => {
+        document.querySelectorAll(selector).forEach(codeElement => {
+            const codeContent = codeElement.innerHTML;
+            const newStructure = document.createElement('div');
+            newStructure.className = 'snippet-clipboard-content position-relative overflow-auto';
+            newStructure.innerHTML = createClipboardHTML(codeContent);
+
+            const parentElement = codeElement.parentElement;
+            if (selector.includes('highlight')) {
+                parentElement.insertBefore(newStructure, codeElement.nextSibling);
+                parentElement.removeChild(codeElement);
+            } else {
+                parentElement.parentElement.replaceChild(newStructure, parentElement);
+            }
+        });
+    };
+
+    handleCodeElements('pre.notranslate > code.notranslate');
+    handleCodeElements('div.highlight > pre.notranslate');
+
+    let currentFeedback = null;
+    document.querySelectorAll('clipboard-copy').forEach(copyButton => {
+        copyButton.addEventListener('click', () => {
+            const codeContent = copyButton.closest('.snippet-clipboard-content').innerText;
+            const tempTextArea = document.createElement('textarea');
+            tempTextArea.value = codeContent;
+            document.body.appendChild(tempTextArea);
+            tempTextArea.select();
+            document.execCommand('copy');
+            document.body.removeChild(tempTextArea);
+
+            const copyIcon = copyButton.querySelector('.octicon-copy');
+            const checkIcon = copyButton.querySelector('.octicon-check');
+            const copyFeedback = copyButton.nextElementSibling;
+
+            if (currentFeedback && currentFeedback !== copyFeedback) {currentFeedback.style.display = 'none';}
+            currentFeedback = copyFeedback;
+
+            copyIcon.classList.add('d-none');
+            checkIcon.classList.remove('d-none');
+            copyFeedback.style.display = 'block';
+            copyButton.style.borderColor = 'var(--color-success-fg)';
+
+            setTimeout(() => {
+                copyIcon.classList.remove('d-none');
+                checkIcon.classList.add('d-none');
+                copyFeedback.style.display = 'none';
+                copyButton.style.borderColor = '';
+            }, 2000);
+        });
+    });
+});
+
+</script>
+
+
+</html>

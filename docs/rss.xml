@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='UTF-8'?>
-<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>刘佳鑫</title><link>https://donkeytt11111.github.io/ljx1997.github.io</link><description>欢迎你</description><copyright>刘佳鑫</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://donkeytt11111.github.io/ljx1997.github.io</link></image><lastBuildDate>Wed, 05 Mar 2025 07:37:57 +0000</lastBuildDate><managingEditor>刘佳鑫</managingEditor><ttl>60</ttl><webMaster>刘佳鑫</webMaster><item><title>ddi_install.sh</title><link>https://donkeytt11111.github.io/ljx1997.github.io/post/ddi_install.sh.html</link><description>```shell
+<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel><title>刘佳鑫</title><link>https://donkeytt11111.github.io/ljx1997.github.io</link><description>欢迎你</description><copyright>刘佳鑫</copyright><docs>http://www.rssboard.org/rss-specification</docs><generator>python-feedgen</generator><image><url>https://github.githubassets.com/favicons/favicon.svg</url><title>avatar</title><link>https://donkeytt11111.github.io/ljx1997.github.io</link></image><lastBuildDate>Wed, 05 Mar 2025 16:35:11 +0000</lastBuildDate><managingEditor>刘佳鑫</managingEditor><ttl>60</ttl><webMaster>刘佳鑫</webMaster><item><title>ddi_install.sh</title><link>https://donkeytt11111.github.io/ljx1997.github.io/post/ddi_install.sh.html</link><description>```shell
 #!/bin/bash
 
 
@@ -292,4 +292,4 @@ install_and_configure_nfs
 
 # 安装和配置bridge
 # install_and_configure_bridge
-。</description><guid isPermaLink="true">https://donkeytt11111.github.io/ljx1997.github.io/post/K8S_install.sh.html</guid><pubDate>Wed, 05 Mar 2025 07:36:33 +0000</pubDate></item><item><title>test</title><link>https://donkeytt11111.github.io/ljx1997.github.io/post/test.html</link><description>test。</description><guid isPermaLink="true">https://donkeytt11111.github.io/ljx1997.github.io/post/test.html</guid><pubDate>Wed, 05 Mar 2025 07:20:50 +0000</pubDate></item></channel></rss>
+。</description><guid isPermaLink="true">https://donkeytt11111.github.io/ljx1997.github.io/post/K8S_install.sh.html</guid><pubDate>Wed, 05 Mar 2025 07:36:33 +0000</pubDate></item></channel></rss>
